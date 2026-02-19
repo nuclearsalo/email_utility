@@ -3,58 +3,40 @@ import pandas as pd
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication # New: for attachments
 import io
 import uuid
 import socket
 from email.utils import formatdate
-from minio import Minio  # New: MinIO client
 
 app = FastAPI(title="UAFIC Email Microservice")
-
-# --- MINIO SETUP ---
-# 'host.docker.internal' allows the app inside a container to talk to your laptop
-minio_client = Minio(
-    "host.docker.internal:9000",
-    access_key="admin",
-    secret_key="password123",
-    secure=False
-)
 
 DEFAULT_BODY = """Добрий день, {Name}!
 
 Мене звати Юрій, турбую Вас з Української асоціації фінтех...
-(Sent via MinIO-Integrated DevOps Pipeline)
+(API Test - Refactored for DevOps Pipeline)
 """
+
 
 @app.post("/send-batch")
 async def send_batch(
         file: UploadFile = File(...),
         smtp_email: str = Form(...),
         smtp_password: str = Form(...),
-        attachment_name: str = Form(...), # New: Filename in your 'email-attachments' bucket
         smtp_server: str = Form("mx1.mirohost.net"),
         smtp_port: int = Form(465),
         subject: str = Form("УАФІК DoWithUA - Open API platform")
 ):
-    # 1. Read the uploaded Excel file
+    # 1. Read the uploaded Excel file into memory
     contents = await file.read()
     try:
         df = pd.read_excel(io.BytesIO(contents))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid Excel file: {e}")
 
-    # 2. FETCH ATTACHMENT FROM MINIO
-    # We grab it ONCE here so we don't spam the storage server in the loop
-    try:
-        response = minio_client.get_object("email-attachments", attachment_name)
-        attachment_data = response.read()
-        response.close()
-        response.release_conn()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not find {attachment_name} in MinIO: {e}")
+    if 'Email' not in df.columns:
+        raise HTTPException(status_code=400, detail="Missing 'Email' column in Excel")
 
-    # 3. Connect to SMTP
+    # 2. Connect to SMTP Server
     try:
         server = smtplib.SMTP_SSL(smtp_server, smtp_port)
         server.login(smtp_email, smtp_password)
@@ -64,7 +46,7 @@ async def send_batch(
     success_count = 0
     fail_count = 0
 
-    # 4. Process and Send
+    # 3. Process and Send Emails
     for index, row in df.iterrows():
         try:
             recipient_email = row['Email']
@@ -77,14 +59,8 @@ async def send_batch(
             msg['Message-ID'] = f"<{uuid.uuid4()}@{socket.gethostname()}>"
             msg['Date'] = formatdate(localtime=True)
 
-            # Attach Body
             body = DEFAULT_BODY.format(**row_data)
             msg.attach(MIMEText(body, 'plain'))
-
-            # ATTACH THE MINIO FILE
-            part = MIMEApplication(attachment_data, Name=attachment_name)
-            part['Content-Disposition'] = f'attachment; filename="{attachment_name}"'
-            msg.attach(part)
 
             server.send_message(msg)
             success_count += 1
@@ -96,6 +72,5 @@ async def send_batch(
     return {
         "status": "completed",
         "emails_sent": success_count,
-        "emails_failed": fail_count,
-        "attachment_used": attachment_name
+        "emails_failed": fail_count
     }
